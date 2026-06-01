@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: emotion-detector
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /
+    envVars:
+      - key: PORT
+        value: 8000

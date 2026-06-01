@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  emotion-detector:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - HF_HUB_DISABLE_SYMLINKS_WARNING=1
+    volumes:
+      # Optional: mount huggingface cache so models aren't redownloaded every time if rebuilt
+      - hf-cache:/root/.cache/huggingface
+
+volumes:
+  hf-cache:
