@@ -274,3 +274,14 @@ if os.path.exists(frontend_dist):
         if os.path.exists(index_path) and not request.url.path.startswith("/api/"):
             return FileResponse(index_path)
         return exc
+
+    import traceback
+    from fastapi.responses import JSONResponse
+    
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request, exc):
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Internal Server Error", "error": str(exc), "traceback": traceback.format_exc()}
+        )
+
