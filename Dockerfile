@@ -17,6 +17,22 @@ RUN apt-get update && apt-get install -y libgl1 libglib2.0-0 && rm -rf /var/lib/
 COPY backend/requirements.txt ./backend/
 RUN pip install --no-cache-dir -r backend/requirements.txt
 
+# Pre-download ML models so they are cached in the Docker image (prevents Render request timeouts)
+RUN python -c "\
+import os; \
+os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING'] = '1'; \
+from transformers import pipeline, TrOCRProcessor, VisionEncoderDecoderModel; \
+pipeline('text-classification', model='j-hartmann/emotion-english-distilroberta-base', top_k=None); \
+pipeline('text-classification', model='cardiffnlp/twitter-roberta-base-sentiment-latest'); \
+pipeline('text-classification', model='mrm8488/bert-tiny-finetuned-sms-spam-detection'); \
+pipeline('image-classification', model='google/vit-base-patch16-224'); \
+TrOCRProcessor.from_pretrained('microsoft/trocr-base-handwritten'); \
+VisionEncoderDecoderModel.from_pretrained('microsoft/trocr-base-handwritten'); \
+from deepface import DeepFace; \
+DeepFace.build_model('VGG-Face'); \
+DeepFace.build_model('Emotion'); \
+" || true
+
 # Copy backend code
 COPY backend/ ./backend/
 

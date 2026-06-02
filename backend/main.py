@@ -36,12 +36,40 @@ def get_db():
         db.close()
 
 # Initialize ML Model (Lazy Loading to save memory on startup)
-emotion_classifier = None
-ocr_processor = None
-ocr_model = None
-spam_classifier = None
-sentiment_classifier = None
-image_classifier = None
+import gc
+
+class ModelManager:
+    def __init__(self):
+        self.emotion_classifier = None
+        self.ocr_processor = None
+        self.ocr_model = None
+        self.spam_classifier = None
+        self.sentiment_classifier = None
+        self.image_classifier = None
+
+    def free_memory(self, keep=None):
+        logger.info(f"Freeing memory, keeping '{keep}'")
+        if keep != "emotion": self.emotion_classifier = None
+        if keep != "ocr":
+            self.ocr_processor = None
+            self.ocr_model = None
+        if keep != "spam": self.spam_classifier = None
+        if keep != "sentiment": self.sentiment_classifier = None
+        if keep != "image": self.image_classifier = None
+        if keep == "deepface":
+            # Just clear others for deepface
+            pass
+        elif keep != "all":
+            # clear Keras session if deepface leaves weights in memory
+            try:
+                import tf_keras as keras
+                keras.backend.clear_session()
+            except:
+                pass
+        
+        gc.collect()
+
+manager = ModelManager()
 
 class AnalyzeRequest(BaseModel):
     text: str
@@ -62,14 +90,14 @@ def analyze_text(request: AnalyzeRequest, db: Session = Depends(get_db)):
     if not request.text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
         
-    global emotion_classifier
-    if emotion_classifier is None:
+    if manager.emotion_classifier is None:
+        manager.free_memory(keep="emotion")
         from transformers import pipeline
         logger.info("Loading Emotion Model...")
         os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
-        emotion_classifier = pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base", top_k=None)
+        manager.emotion_classifier = pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base", top_k=None)
 
-    results = emotion_classifier(request.text.strip())[0]
+    results = manager.emotion_classifier(request.text.strip())[0]
     top_emotion = max(results, key=lambda x: x['score'])
     
     db_log = database.EmotionLog(
@@ -91,6 +119,7 @@ def analyze_text(request: AnalyzeRequest, db: Session = Depends(get_db)):
 
 @app.post("/api/analyze-image")
 async def analyze_image(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    manager.free_memory(keep="deepface")
     from deepface import DeepFace
     # Save uploaded file to temp file
     fd, path = tempfile.mkstemp(suffix=".jpg")
@@ -162,17 +191,17 @@ async def analyze_drawing(file: UploadFile = File(...), db: Session = Depends(ge
         # Load image with PIL
         image = Image.open(path).convert("RGB")
         
-        global ocr_processor, ocr_model
-        if ocr_processor is None or ocr_model is None:
+        if manager.ocr_processor is None or manager.ocr_model is None:
+            manager.free_memory(keep="ocr")
             from transformers import TrOCRProcessor, VisionEncoderDecoderModel
             logger.info("Loading OCR Model...")
-            ocr_processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-handwritten")
-            ocr_model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-handwritten")
+            manager.ocr_processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-handwritten")
+            manager.ocr_model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-handwritten")
 
         # Run explicit TrOCR model
-        pixel_values = ocr_processor(image, return_tensors="pt").pixel_values
-        generated_ids = ocr_model.generate(pixel_values, max_new_tokens=30)
-        prediction = ocr_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        pixel_values = manager.ocr_processor(image, return_tensors="pt").pixel_values
+        generated_ids = manager.ocr_model.generate(pixel_values, max_new_tokens=30)
+        prediction = manager.ocr_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
         
         # Save to database log just for history completeness
         db_log = database.EmotionLog(
@@ -201,13 +230,13 @@ def analyze_sentiment(request: AnalyzeRequest):
     if not request.text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
     
-    global sentiment_classifier
-    if sentiment_classifier is None:
+    if manager.sentiment_classifier is None:
+        manager.free_memory(keep="sentiment")
         from transformers import pipeline
         logger.info("Loading Sentiment Model...")
-        sentiment_classifier = pipeline("text-classification", model="cardiffnlp/twitter-roberta-base-sentiment-latest")
+        manager.sentiment_classifier = pipeline("text-classification", model="cardiffnlp/twitter-roberta-base-sentiment-latest")
 
-    results = sentiment_classifier(request.text.strip())[0]
+    results = manager.sentiment_classifier(request.text.strip())[0]
     return {"sentiment": results['label'], "confidence": results['score']}
 
 @app.post("/api/detect-spam")
@@ -215,13 +244,13 @@ def detect_spam(request: AnalyzeRequest):
     if not request.text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
         
-    global spam_classifier
-    if spam_classifier is None:
+    if manager.spam_classifier is None:
+        manager.free_memory(keep="spam")
         from transformers import pipeline
         logger.info("Loading Spam Classifier...")
-        spam_classifier = pipeline("text-classification", model="mrm8488/bert-tiny-finetuned-sms-spam-detection")
+        manager.spam_classifier = pipeline("text-classification", model="mrm8488/bert-tiny-finetuned-sms-spam-detection")
 
-    results = spam_classifier(request.text.strip())[0]
+    results = manager.spam_classifier(request.text.strip())[0]
     return {"label": results['label'], "confidence": results['score']}
 
 @app.post("/api/classify-image")
@@ -232,13 +261,13 @@ async def classify_image(file: UploadFile = File(...)):
             f.write(await file.read())
         image = Image.open(path).convert("RGB")
         
-        global image_classifier
-        if image_classifier is None:
+        if manager.image_classifier is None:
+            manager.free_memory(keep="image")
             from transformers import pipeline
             logger.info("Loading Image Classifier...")
-            image_classifier = pipeline("image-classification", model="google/vit-base-patch16-224")
+            manager.image_classifier = pipeline("image-classification", model="google/vit-base-patch16-224")
 
-        results = image_classifier(image)
+        results = manager.image_classifier(image)
         return {"predictions": results}
     finally:
         if os.path.exists(path):
