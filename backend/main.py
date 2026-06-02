@@ -3,11 +3,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List, Dict, Any
-from transformers import pipeline
+import httpx
 import database
 import os
 import tempfile
 import logging
+import gc
 from PIL import Image
 
 # Setup logging
@@ -35,41 +36,34 @@ def get_db():
     finally:
         db.close()
 
-# Initialize ML Model (Lazy Loading to save memory on startup)
-import gc
-
-class ModelManager:
-    def __init__(self):
-        self.emotion_classifier = None
-        self.ocr_processor = None
-        self.ocr_model = None
-        self.spam_classifier = None
-        self.sentiment_classifier = None
-        self.image_classifier = None
-
-    def free_memory(self, keep=None):
-        logger.info(f"Freeing memory, keeping '{keep}'")
-        if keep != "emotion": self.emotion_classifier = None
-        if keep != "ocr":
-            self.ocr_processor = None
-            self.ocr_model = None
-        if keep != "spam": self.spam_classifier = None
-        if keep != "sentiment": self.sentiment_classifier = None
-        if keep != "image": self.image_classifier = None
-        if keep == "deepface":
-            # Just clear others for deepface
-            pass
-        elif keep != "all":
-            # clear Keras session if deepface leaves weights in memory
-            try:
-                import tf_keras as keras
-                keras.backend.clear_session()
-            except:
-                pass
+# HF REST API Fallback Function (replaces heavy PyTorch execution)
+def hf_inference(model_id, payload, is_image=False, retries=3):
+    url = f"https://api-inference.huggingface.co/models/{model_id}"
+    headers = {}
+    if os.environ.get("HF_TOKEN"):
+        headers["Authorization"] = f"Bearer {os.environ.get('HF_TOKEN')}"
         
-        gc.collect()
-
-manager = ModelManager()
+    for i in range(retries):
+        try:
+            if is_image:
+                res = httpx.post(url, headers=headers, content=payload, timeout=30.0)
+            else:
+                res = httpx.post(url, headers=headers, json=payload, timeout=30.0)
+                
+            if res.status_code == 200:
+                return res.json()
+            elif res.status_code == 503:
+                import time
+                time.sleep(2)
+                continue
+            else:
+                raise Exception(f"HF API Error: {res.text}")
+        except Exception as e:
+            if i == retries - 1:
+                raise e
+            import time
+            time.sleep(2)
+    raise Exception(f"HF API timeout/error for {model_id}")
 
 class AnalyzeRequest(BaseModel):
     text: str
@@ -90,14 +84,12 @@ def analyze_text(request: AnalyzeRequest, db: Session = Depends(get_db)):
     if not request.text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
         
-    if manager.emotion_classifier is None:
-        manager.free_memory(keep="emotion")
-        from transformers import pipeline
-        logger.info("Loading Emotion Model...")
-        os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
-        manager.emotion_classifier = pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base", top_k=None)
-
-    results = manager.emotion_classifier(request.text.strip())[0]
+    logger.info("Calling HF API for Emotion Model...")
+    results = hf_inference("j-hartmann/emotion-english-distilroberta-base", {"inputs": request.text.strip()})
+    
+    if isinstance(results, list) and isinstance(results[0], list):
+        results = results[0] # unwrap batch
+        
     top_emotion = max(results, key=lambda x: x['score'])
     
     db_log = database.EmotionLog(
@@ -119,7 +111,6 @@ def analyze_text(request: AnalyzeRequest, db: Session = Depends(get_db)):
 
 @app.post("/api/analyze-image")
 async def analyze_image(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    manager.free_memory(keep="deepface")
     from deepface import DeepFace
     # Save uploaded file to temp file
     fd, path = tempfile.mkstemp(suffix=".jpg")
@@ -168,6 +159,14 @@ async def analyze_image(file: UploadFile = File(...), db: Session = Depends(get_
         db.commit()
         db.refresh(db_log)
         
+        # Garbage collect Keras backend dynamically
+        try:
+            import tf_keras as keras
+            keras.backend.clear_session()
+        except:
+            pass
+        gc.collect()
+        
         return {
             "faces_count": len(faces_data),
             "faces": faces_data
@@ -182,28 +181,16 @@ async def analyze_image(file: UploadFile = File(...), db: Session = Depends(get_
 
 @app.post("/api/analyze-drawing")
 async def analyze_drawing(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    # Save uploaded file to temp file
-    fd, path = tempfile.mkstemp(suffix=".jpg")
+    image_bytes = await file.read()
     try:
-        with os.fdopen(fd, 'wb') as f:
-            f.write(await file.read())
-
-        # Load image with PIL
-        image = Image.open(path).convert("RGB")
+        logger.info("Calling HF API for OCR Model...")
+        results = hf_inference("microsoft/trocr-base-handwritten", image_bytes, is_image=True)
         
-        if manager.ocr_processor is None or manager.ocr_model is None:
-            manager.free_memory(keep="ocr")
-            from transformers import TrOCRProcessor, VisionEncoderDecoderModel
-            logger.info("Loading OCR Model...")
-            manager.ocr_processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-handwritten")
-            manager.ocr_model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-handwritten")
-
-        # Run explicit TrOCR model
-        pixel_values = manager.ocr_processor(image, return_tensors="pt").pixel_values
-        generated_ids = manager.ocr_model.generate(pixel_values, max_new_tokens=30)
-        prediction = manager.ocr_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        
-        # Save to database log just for history completeness
+        prediction = ""
+        # HF image-to-text API mostly returns [{'generated_text': '...'}]
+        if isinstance(results, list) and len(results) > 0:
+            prediction = results[0].get("generated_text", "")
+            
         db_log = database.EmotionLog(
             text=f"Drawing recognized as: {prediction}",
             dominant_emotion="neutral",
@@ -221,57 +208,45 @@ async def analyze_drawing(file: UploadFile = File(...), db: Session = Depends(ge
     except Exception as e:
         logger.error(f"Error in drawing analysis: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail={"error": "Drawing analysis failed", "message": str(e)})
-    finally:
-        if os.path.exists(path):
-            os.remove(path)
 
 @app.post("/api/analyze-sentiment")
 def analyze_sentiment(request: AnalyzeRequest):
     if not request.text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
     
-    if manager.sentiment_classifier is None:
-        manager.free_memory(keep="sentiment")
-        from transformers import pipeline
-        logger.info("Loading Sentiment Model...")
-        manager.sentiment_classifier = pipeline("text-classification", model="cardiffnlp/twitter-roberta-base-sentiment-latest")
-
-    results = manager.sentiment_classifier(request.text.strip())[0]
-    return {"sentiment": results['label'], "confidence": results['score']}
+    logger.info("Calling HF API for Sentiment Model...")
+    results = hf_inference("cardiffnlp/twitter-roberta-base-sentiment-latest", {"inputs": request.text.strip()})
+    
+    if isinstance(results, list) and isinstance(results[0], list):
+        results = results[0]
+        
+    top_sentiment = max(results, key=lambda x: x['score'])
+    return {"sentiment": top_sentiment['label'], "confidence": top_sentiment['score']}
 
 @app.post("/api/detect-spam")
 def detect_spam(request: AnalyzeRequest):
     if not request.text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
         
-    if manager.spam_classifier is None:
-        manager.free_memory(keep="spam")
-        from transformers import pipeline
-        logger.info("Loading Spam Classifier...")
-        manager.spam_classifier = pipeline("text-classification", model="mrm8488/bert-tiny-finetuned-sms-spam-detection")
-
-    results = manager.spam_classifier(request.text.strip())[0]
-    return {"label": results['label'], "confidence": results['score']}
+    logger.info("Calling HF API for Spam Classifier...")
+    results = hf_inference("mrm8488/bert-tiny-finetuned-sms-spam-detection", {"inputs": request.text.strip()})
+    
+    if isinstance(results, list) and isinstance(results[0], list):
+        results = results[0]
+        
+    top_spam = max(results, key=lambda x: x['score'])
+    return {"label": top_spam['label'], "confidence": top_spam['score']}
 
 @app.post("/api/classify-image")
 async def classify_image(file: UploadFile = File(...)):
-    fd, path = tempfile.mkstemp(suffix=".jpg")
+    image_bytes = await file.read()
     try:
-        with os.fdopen(fd, 'wb') as f:
-            f.write(await file.read())
-        image = Image.open(path).convert("RGB")
-        
-        if manager.image_classifier is None:
-            manager.free_memory(keep="image")
-            from transformers import pipeline
-            logger.info("Loading Image Classifier...")
-            manager.image_classifier = pipeline("image-classification", model="google/vit-base-patch16-224")
-
-        results = manager.image_classifier(image)
+        logger.info("Calling HF API for Image Classifier...")
+        results = hf_inference("google/vit-base-patch16-224", image_bytes, is_image=True)
         return {"predictions": results}
-    finally:
-        if os.path.exists(path):
-            os.remove(path)
+    except Exception as e:
+        logger.error(f"Error in image classification: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail={"error": "Classification failed", "message": str(e)})
 
 @app.get("/api/history")
 def get_history(limit: int = 20, db: Session = Depends(get_db)):
@@ -313,4 +288,3 @@ if os.path.exists(frontend_dist):
             status_code=500,
             content={"detail": "Internal Server Error", "error": str(exc), "traceback": traceback.format_exc()}
         )
-
