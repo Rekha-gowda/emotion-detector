@@ -12,21 +12,16 @@ export default function ClassificationPanel() {
     setError(null);
     setResult(null);
 
-    const formData = new FormData();
-    formData.append('file', file);
+    const url = URL.createObjectURL(file);
 
     try {
-      const res = await fetch('/api/classify-image', {
-        method: 'POST',
-        body: formData
-      });
-
-      if (!res.ok) throw new Error('Image classification failed on the server.');
-
-      const data = await res.json();
-      setResult(data);
+      const { pipeline, env } = await import('@xenova/transformers');
+      env.allowLocalModels = false;
+      const classifier = await pipeline('image-classification', 'Xenova/vit-base-patch16-224');
+      const predictions = await classifier(url, { topk: 5 });
+      setResult({ predictions });
     } catch (err) {
-      setError(err.message || 'Failed to connect to ML Engine.');
+      setError(err.message || 'Failed to connect to ML Engine locally.');
     } finally {
       setLoading(false);
     }

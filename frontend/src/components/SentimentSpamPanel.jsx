@@ -13,16 +13,25 @@ export default function SentimentSpamPanel() {
     setLoading(true); setResult(null); setError(''); setMode(endpoint);
     
     try {
-      const res = await fetch(`/api/${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text })
-      });
-      if (!res.ok) throw new Error(`${endpoint} failed`);
-      const data = await res.json();
-      setResult(data);
+      if (endpoint === 'analyze-sentiment') {
+        const { pipeline } = await import('@xenova/transformers');
+        const classifier = await pipeline('text-classification', 'Xenova/twitter-roberta-base-sentiment-latest');
+        let out = await classifier(text, { topk: null });
+        let all_scores = Array.isArray(out) && Array.isArray(out[0]) ? out[0] : (Array.isArray(out) ? out : [out]);
+        const top_sentiment = all_scores.reduce((max, obj) => obj.score > max.score ? obj : max, all_scores[0]);
+        
+        setResult({ sentiment: top_sentiment.label, confidence: top_sentiment.score });
+      } else {
+        const { pipeline } = await import('@xenova/transformers');
+        const classifier = await pipeline('text-classification', 'Xenova/bert-tiny-finetuned-sms-spam-detection');
+        let out = await classifier(text, { topk: null });
+        let all_scores = Array.isArray(out) && Array.isArray(out[0]) ? out[0] : (Array.isArray(out) ? out : [out]);
+        const top_spam = all_scores.reduce((max, obj) => obj.score > max.score ? obj : max, all_scores[0]);
+        
+        setResult({ label: top_spam.label, confidence: top_spam.score });
+      }
     } catch (err) {
-      setError(err.message || 'Failed to connect to ML Engine.');
+      setError(err.message || 'Failed to analyze locally via WebAssembly.');
     } finally {
       setLoading(false);
     }

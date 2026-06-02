@@ -11,6 +11,11 @@ const COLORS = {
   neutral: 'var(--emotion-neutral)',
 };
 
+import { pipeline, env } from '@xenova/transformers';
+
+// Disable local model paths to strictly use CDN
+env.allowLocalModels = false;
+
 export default function AnalysisPanel({ onNewAnalysis }) {
   const [text, setText] = useState('');
   const [loading, setLoading] = useState(false);
@@ -25,24 +30,40 @@ export default function AnalysisPanel({ onNewAnalysis }) {
     setError('');
     
     try {
+      // 1. Run local browser ML inference
+      const classifier = await pipeline('text-classification', 'Xenova/emotion-english-distilroberta-base');
+      let out = await classifier(text, { topk: null });
+      
+      // Normalize array outputs
+      let all_scores = Array.isArray(out) && Array.isArray(out[0]) ? out[0] : (Array.isArray(out) ? out : [out]);
+      
+      const top_emotion = all_scores.reduce((max, obj) => obj.score > max.score ? obj : max, all_scores[0]);
+      
+      const payload = {
+        text: text,
+        dominant_emotion: top_emotion.label,
+        confidence: top_emotion.score,
+        all_scores: all_scores.map(r => ({ label: r.label, score: r.score }))
+      };
+
+      // 2. Save log to backend
       const res = await fetch('/api/analyze', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ text })
+        body: JSON.stringify(payload)
       });
       
       if (!res.ok) {
-        throw new Error('Analysis failed');
+        throw new Error('Database logging failed, but ML succeeded.');
       }
       
-      const data = await res.json();
-      setResult(data);
+      setResult(payload);
       onNewAnalysis();
       setText(''); // clear after success
     } catch (err) {
-      setError(err.message || 'Failed to connect to ML Engine.');
+      setError(err.message || 'Failed to analyze text using local ML Engine.');
     } finally {
       setLoading(false);
     }
