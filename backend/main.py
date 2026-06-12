@@ -98,69 +98,8 @@ def log_image_analysis(req: ImageAnalyzeRequest, db: Session = Depends(get_db)):
     db.refresh(db_log)
     return {"status": "ok"}
 
-import tempfile
-@app.post("/api/analyze-image")
-async def analyze_image(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    from deepface import DeepFace
-    import gc
-    
-    # Save uploaded file to temp file
-    fd, path = tempfile.mkstemp(suffix=".jpg")
-    try:
-        with os.fdopen(fd, 'wb') as f:
-            f.write(await file.read())
-
-        # Extract features using deepface
-        results = DeepFace.analyze(img_path=path, actions=['emotion'], enforce_detection=False)
-        
-        if isinstance(results, dict):
-            results = [results]
-            
-        faces_data = []
-        for face in results:
-            if face.get('emotion'):
-                emotions_dict = face['emotion']
-                dom_emo = max(emotions_dict, key=emotions_dict.get)
-                conf = float(emotions_dict[dom_emo])
-                all_scores = [{"label": k, "score": float(v) / 100.0} for k, v in emotions_dict.items()]
-                faces_data.append({
-                    "dominant_emotion": dom_emo,
-                    "confidence": conf,
-                    "region": face.get('region'),
-                    "all_scores": all_scores
-                })
-        
-        summary = f"Image parsed: {len(faces_data)} face(s) counted."
-        if len(faces_data) > 0:
-            avg_emo = faces_data[0]["dominant_emotion"]
-            conf = float(faces_data[0]["confidence"]) / 100.0
-        else:
-            avg_emo = "neutral"
-            conf = 1.0
-
-        db_log = database.EmotionLog(text=summary, dominant_emotion=avg_emo, confidence=conf)
-        db.add(db_log)
-        db.commit()
-        db.refresh(db_log)
-        
-        try:
-            import tf_keras as keras
-            keras.backend.clear_session()
-        except:
-            pass
-        gc.collect()
-        
-        return {
-            "faces_count": len(faces_data),
-            "faces": faces_data
-        }
-
-    except Exception as e:
-        logger.error(f"Error in image analysis: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail={"error": "Image analysis failed", "message": str(e)})
-    finally:
-        if os.path.exists(path):
-            os.remove(path)
+# Legacy /api/analyze-image endpoint removed because ML face processing is now 
+# entirely securely processed client-side via WebAssembly in the browser.
 
 class DrawingAnalyzeRequest(BaseModel):
     prediction: str
