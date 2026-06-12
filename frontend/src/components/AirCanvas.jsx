@@ -10,6 +10,8 @@ export default function AirCanvas() {
   const [PredictionResult, setPredictionResult] = useState(null);
   const [error, setError] = useState(null);
   const [activeColor, setActiveColor] = useState('white');
+  const [cameraFailed, setCameraFailed] = useState(false);
+  const [isDrawingMouse, setIsDrawingMouse] = useState(false);
 
   const videoRef = useRef(null);
   const inkCanvasRef = useRef(null);
@@ -61,14 +63,29 @@ export default function AirCanvas() {
           
           // Wait for video details to load
           videoRef.current.onloadedmetadata = async () => {
-            try { await videoRef.current.play(); } catch(e) {}
-            initCanvas();
-            predictLoop();
+             try { await videoRef.current.play(); } catch(e) {}
+             initCanvas();
+             predictLoop();
           };
         }
       }, 50);
     } catch (err) {
-      setError(`Camera Error: ${err.message}`);
+      setCameraFailed(true);
+      setError(`Hardware Webcam Locked. Fallback active: You can now draw with your Mouse instead!`);
+      setTimeout(() => initCanvasFallback(), 100);
+    }
+  };
+
+  const initCanvasFallback = () => {
+    if (inkCanvasRef.current) {
+      inkCanvasRef.current.width = 640;
+      inkCanvasRef.current.height = 480;
+      const ctx = inkCanvasRef.current.getContext('2d');
+      ctx.fillStyle = "black";
+      ctx.fillRect(0, 0, inkCanvasRef.current.width, inkCanvasRef.current.height);
+      ctx.lineWidth = 15;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
     }
   };
 
@@ -167,7 +184,60 @@ export default function AirCanvas() {
     setError(null);
     setPredictionResult(null);
 
-    const dataUrl = inkCanvasRef.current.toDataURL('image/jpeg');
+    const canvas = inkCanvasRef.current;
+    if (canvas.width === 0 || canvas.height === 0) {
+       setAnalyzing(false);
+       return;
+    }
+
+    // Crop the ink to prevent OCR hallucination on empty space
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imageData.data;
+
+    let minX = canvas.width, minY = canvas.height, maxX = 0, maxY = 0;
+    let hasInk = false;
+
+    for (let y = 0; y < canvas.height; y++) {
+      for (let x = 0; x < canvas.width; x++) {
+        const i = (y * canvas.width + x) * 4;
+        if (data[i] > 20 || data[i+1] > 20 || data[i+2] > 20) {
+          hasInk = true;
+          if (x < minX) minX = x;
+          if (y < minY) minY = y;
+          if (x > maxX) maxX = x;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+
+    if (!hasInk || minX >= maxX || minY >= maxY) {
+      setPredictionResult({ text: "Nothing drawn!", confidence: 0 });
+      setAnalyzing(false);
+      return;
+    }
+
+    const pad = 30;
+    minX = Math.max(0, minX - pad);
+    minY = Math.max(0, minY - pad);
+    maxX = Math.min(canvas.width, maxX + pad);
+    maxY = Math.min(canvas.height, maxY + pad);
+    
+    const width = maxX - minX;
+    const height = maxY - minY;
+
+    const cropCanvas = document.createElement('canvas');
+    // TrOCR is trained on black text over white paper. 
+    // We must invert our dark-mode canvas (black bg, white text) -> (white bg, black text)
+    cropCanvas.width = width;
+    cropCanvas.height = height;
+    const cropCtx = cropCanvas.getContext('2d');
+    
+    // Invert the colors during copy
+    cropCtx.filter = 'invert(1)';
+    cropCtx.drawImage(canvas, minX, minY, width, height, 0, 0, width, height);
+
+    const dataUrl = cropCanvas.toDataURL('image/jpeg');
 
     try {
       const { pipeline, env } = await import('@xenova/transformers');
@@ -199,9 +269,10 @@ export default function AirCanvas() {
       <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', lineHeight: '1.5' }}>
         <strong>Air Canvas & Gestures:</strong> Show your <strong style={{color:'var(--accent-color)'}}>Index Finger (Pointing Up)</strong> to draw in the air. 
         Show an <strong style={{color:'var(--emotion-joy)'}}>Open Palm</strong> to lift your pen. Show <strong style={{color:'var(--emotion-anger)'}}>Thumb Down</strong> to clear the canvas.
+        <br/><span style={{color: 'var(--emotion-fear)'}}>If camera fails, you can use your mouse to draw!</span>
       </p>
 
-      {error && <div style={{ color: 'var(--emotion-anger)' }}>{error}</div>}
+      {error && <div style={{ color: 'var(--emotion-anger)', padding: '0.5rem', background: 'rgba(255,0,0,0.1)', borderRadius: '8px' }}>{error}</div>}
 
       <div style={{ position: 'relative', borderRadius: '12px', overflow: 'hidden', background: '#000', border: '1px solid rgba(255,255,255,0.1)', minHeight: '300px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         
@@ -211,7 +282,7 @@ export default function AirCanvas() {
           </div>
         )}
 
-        {!streamActive ? (
+        {!streamActive && !cameraFailed ? (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1rem', zIndex: 10 }}>
             <Camera size={40} style={{ color: 'rgba(255,255,255,0.2)' }} />
             <button onClick={enableCamera} disabled={loadingModel} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -222,18 +293,40 @@ export default function AirCanvas() {
         ) : (
           <>
             {/* The actual video feed */}
-            <video 
-              ref={videoRef} 
-              autoPlay 
-              playsInline 
-              muted 
-              style={{ position: 'absolute', width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)', opacity: 0.5 }}
-            />
+            {streamActive && (
+                <video 
+                  ref={videoRef} 
+                  autoPlay 
+                  playsInline 
+                  muted 
+                  style={{ position: 'absolute', width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)', opacity: 0.5 }}
+                />
+            )}
             
             {/* The transparent drawing canvas overlay */}
             <canvas 
               ref={inkCanvasRef} 
-              style={{ position: 'absolute', width: '100%', height: '100%', objectFit: 'cover', zIndex: 10, mixBlendMode: 'screen' }} 
+              onMouseDown={(e) => {
+                 setIsDrawingMouse(true);
+                 const r = inkCanvasRef.current.getBoundingClientRect();
+                 prevPositionRef.current = { x: e.clientX - r.left, y: e.clientY - r.top };
+              }}
+              onMouseMove={(e) => {
+                 if (!isDrawingMouse) return;
+                 const r = inkCanvasRef.current.getBoundingClientRect();
+                 const x = e.clientX - r.left;
+                 const y = e.clientY - r.top;
+                 const ctx = inkCanvasRef.current.getContext('2d');
+                 ctx.strokeStyle = strokeColorRef.current;
+                 ctx.beginPath();
+                 ctx.moveTo(prevPositionRef.current.x, prevPositionRef.current.y);
+                 ctx.lineTo(x, y);
+                 ctx.stroke();
+                 prevPositionRef.current = { x, y };
+              }}
+              onMouseUp={() => setIsDrawingMouse(false)}
+              onMouseLeave={() => setIsDrawingMouse(false)}
+              style={{ position: streamActive ? 'absolute' : 'relative', width: streamActive ? '100%' : '640px', height: streamActive ? '100%' : '480px', objectFit: 'cover', zIndex: 10, mixBlendMode: streamActive ? 'screen' : 'normal', cursor: 'crosshair', background: 'black' }} 
             />
 
             {/* Live Gesture Pill */}

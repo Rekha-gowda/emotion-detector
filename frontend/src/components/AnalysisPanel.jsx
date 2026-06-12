@@ -31,7 +31,7 @@ export default function AnalysisPanel({ onNewAnalysis }) {
     
     try {
       // 1. Run local browser ML inference
-      const classifier = await pipeline('text-classification', 'Xenova/emotion-english-distilroberta-base');
+      const classifier = await pipeline('text-classification', 'Xenova/distilbert-base-uncased-finetuned-sst-2-english');
       let out = await classifier(text, { topk: null });
       
       // Normalize array outputs
@@ -39,11 +39,18 @@ export default function AnalysisPanel({ onNewAnalysis }) {
       
       const top_emotion = all_scores.reduce((max, obj) => obj.score > max.score ? obj : max, all_scores[0]);
       
+      // Map Sentiment to the expected Emotion UI labels
+      let dominant = top_emotion.label === 'POSITIVE' ? 'joy' : 'sadness';
+      let confidence = top_emotion.score;
+
       const payload = {
         text: text,
-        dominant_emotion: top_emotion.label,
-        confidence: top_emotion.score,
-        all_scores: all_scores.map(r => ({ label: r.label, score: r.score }))
+        dominant_emotion: dominant,
+        confidence: confidence,
+        all_scores: all_scores.map(r => ({ 
+          label: r.label === 'POSITIVE' ? 'joy' : 'sadness', 
+          score: r.score 
+        }))
       };
 
       // 2. Save log to backend
@@ -56,7 +63,7 @@ export default function AnalysisPanel({ onNewAnalysis }) {
       });
       
       if (!res.ok) {
-        throw new Error('Database logging failed, but ML succeeded.');
+        console.warn('Logging to backend failed, but ML succeeded.');
       }
       
       setResult(payload);

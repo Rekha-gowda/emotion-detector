@@ -23,12 +23,12 @@ export default function SentimentSpamPanel() {
         setResult({ sentiment: top_sentiment.label, confidence: top_sentiment.score });
       } else {
         const { pipeline } = await import('@xenova/transformers');
-        const classifier = await pipeline('text-classification', 'Xenova/bert-tiny-finetuned-sms-spam-detection');
+        const classifier = await pipeline('text-classification', 'Xenova/toxic-bert');
         let out = await classifier(text, { topk: null });
         let all_scores = Array.isArray(out) && Array.isArray(out[0]) ? out[0] : (Array.isArray(out) ? out : [out]);
-        const top_spam = all_scores.reduce((max, obj) => obj.score > max.score ? obj : max, all_scores[0]);
+        const top_toxic = all_scores.reduce((max, obj) => obj.score > max.score ? obj : max, all_scores[0]);
         
-        setResult({ label: top_spam.label, confidence: top_spam.score });
+        setResult({ label: top_toxic.label, confidence: top_toxic.score });
       }
     } catch (err) {
       setError(err.message || 'Failed to analyze locally via WebAssembly.');
@@ -41,8 +41,12 @@ export default function SentimentSpamPanel() {
   const formatLabel = (lbl) => {
     if (!lbl) return '';
     let val = lbl.toUpperCase();
-    if (val === 'LABEL_1') return 'SPAM';
-    if (val === 'LABEL_0') return 'NOT SPAM (HAM)';
+    if (val === 'TOXIC') return 'TOXIC CONTENT';
+    if (val === 'SEVERE_TOXIC') return 'SEVERE TOXICITY';
+    if (val === 'OBSCENE') return 'OBSCENE';
+    if (val === 'THREAT') return 'THREAT';
+    if (val === 'INSULT') return 'INSULT';
+    if (val === 'IDENTITY_HATE') return 'HATE SPEECH';
     return val;
   };
 
@@ -62,9 +66,9 @@ export default function SentimentSpamPanel() {
           {loading && mode === 'analyze-sentiment' ? <Loader2 size={18} className="spin" /> : <Heart size={18} />}
           Deep Sentiment Analysis
         </button>
-        <button onClick={() => handleAnalyze('detect-spam')} disabled={loading || !text.trim()} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flex: 1, background: 'linear-gradient(135deg, #ef4444, #b91c1c)' }}>
-          {loading && mode === 'detect-spam' ? <Loader2 size={18} className="spin" /> : <Shield size={18} />}
-          Check Spam Probability
+        <button onClick={() => handleAnalyze('detect-toxicity')} disabled={loading || !text.trim()} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flex: 1, background: 'linear-gradient(135deg, #ef4444, #b91c1c)' }}>
+          {loading && mode === 'detect-toxicity' ? <Loader2 size={18} className="spin" /> : <Shield size={18} />}
+          Check Toxicity Probability
         </button>
       </div>
 
@@ -87,12 +91,12 @@ export default function SentimentSpamPanel() {
         </div>
       )}
 
-      {result && !loading && mode === 'detect-spam' && (
+      {result && !loading && mode === 'detect-toxicity' && (
         <div className="animate-in" style={{ background: 'rgba(0,0,0,0.2)', padding: '1.5rem', borderRadius: '12px' }}>
-          <h3 style={{ color: 'var(--text-muted)' }}>Spam Evaluation</h3>
+          <h3 style={{ color: 'var(--text-muted)' }}>Toxicity Evaluation</h3>
           <div style={{ 
             fontSize: '2.5rem', fontWeight: 'bold', marginTop: '0.5rem',
-            color: formatLabel(result.label) === 'SPAM' ? 'var(--emotion-anger)' : 'var(--emotion-joy)' 
+            color: 'var(--emotion-anger)' 
           }}>
             {formatLabel(result.label)}
           </div>

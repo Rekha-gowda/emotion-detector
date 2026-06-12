@@ -1,11 +1,15 @@
 import React, { useRef, useState, useCallback } from 'react';
 import { Camera, Upload, Loader2, Volume2, Wand2 } from 'lucide-react';
 import AirCanvas from './AirCanvas';
+import { FaceDetector, FilesetResolver } from "@mediapipe/tasks-vision";
 
 const EMOTION_COLORS = {
   joy: 'var(--emotion-joy)',
+  happy: 'var(--emotion-joy)',
   sadness: 'var(--emotion-sadness)',
+  sad: 'var(--emotion-sadness)',
   anger: 'var(--emotion-anger)',
+  angry: 'var(--emotion-anger)',
   fear: 'var(--emotion-fear)',
   surprise: 'var(--emotion-surprise)',
   disgust: 'var(--emotion-disgust)',
@@ -24,6 +28,25 @@ export default function VisionPanel({ onNewAnalysis }) {
   
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const faceDetectorRef = useRef(null);
+
+  React.useEffect(() => {
+    async function loadFaceModel() {
+      try {
+        const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm");
+        faceDetectorRef.current = await FaceDetector.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite",
+            delegate: "GPU"
+          },
+          runningMode: "IMAGE"
+        });
+      } catch (err) {
+        console.error("Failed to load Face Detector", err);
+      }
+    }
+    loadFaceModel();
+  }, []);
 
   const startCamera = async () => {
     try {
@@ -45,7 +68,7 @@ export default function VisionPanel({ onNewAnalysis }) {
       if (err.name === 'NotAllowedError') {
         setError('Camera access denied. Please allow permissions in Chrome.');
       } else {
-        setError(`Camera Error: ${err.name} - ${err.message}`);
+        setError(`Hardware Camera Locked or Missing (${err.name}). Please use the 'Upload' tab above to test images instead!`);
       }
       console.error(err);
     }
@@ -106,23 +129,81 @@ export default function VisionPanel({ onNewAnalysis }) {
     setError(null);
     setResult(null);
 
-    const formData = new FormData();
-    formData.append('file', blob, 'capture.jpg');
-
     try {
-      const res = await fetch('/api/analyze-image', {
+      const imageUrl = URL.createObjectURL(blob);
+      const img = new Image();
+      img.src = imageUrl;
+      await new Promise(r => img.onload = r);
+
+      let detectedFaces = [];
+      if (faceDetectorRef.current) {
+         const faces = faceDetectorRef.current.detect(img);
+         detectedFaces = faces.detections;
+      }
+      
+      const { pipeline, env } = await import('@xenova/transformers');
+      env.allowLocalModels = false;
+
+      // Ensure model is cached
+      const classifier = await pipeline('image-classification', 'Xenova/facial_emotions_image_detection');
+      
+      const faceDataList = [];
+
+      if (detectedFaces.length > 0) {
+         for (let detection of detectedFaces) {
+             const bbox = detection.boundingBox;
+             const cropCanvas = document.createElement('canvas');
+             cropCanvas.width = bbox.width;
+             cropCanvas.height = bbox.height;
+             const cropCtx = cropCanvas.getContext('2d');
+             cropCtx.drawImage(img, bbox.originX, bbox.originY, bbox.width, bbox.height, 0, 0, bbox.width, bbox.height);
+             const cropUrl = cropCanvas.toDataURL('image/jpeg');
+             
+             let out = await classifier(cropUrl, { topk: null });
+             let all_scores = Array.isArray(out) ? out : [out];
+             const top_emotion = all_scores.reduce((max, obj) => obj.score > max.score ? obj : max, all_scores[0]);
+             
+             faceDataList.push({
+               dominant_emotion: top_emotion.label,
+               confidence: top_emotion.score * 100,
+               all_scores: all_scores.map(r => ({ label: r.label, score: r.score }))
+             });
+         }
+      }
+      
+      URL.revokeObjectURL(imageUrl);
+
+      const resultData = {
+        faces_count: detectedFaces.length,
+        faces: faceDataList,
+      };
+
+      const topEm = faceDataList.length > 0 ? faceDataList[0].dominant_emotion : 'N/A';
+      const topConf = faceDataList.length > 0 ? faceDataList[0].confidence / 100 : 0;
+
+      // 2. Save log to backend
+      const logPayload = {
+        summary: `Image parsed: ${detectedFaces.length} face(s) counted. (Local Inference)`,
+        dominant_emotion: topEm,
+        confidence: topConf,
+        faces_count: detectedFaces.length,
+        faces: faceDataList
+      };
+      
+      const res = await fetch('/api/analyze-image-log', {
         method: 'POST',
-        body: formData
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(logPayload)
       });
 
       if (!res.ok) {
-        throw new Error('Image analysis failed on the server.');
+        console.warn('Logging to backend failed, but local inference succeeded.');
       }
 
-      const data = await res.json();
-      setResult(data);
+      setResult(resultData);
       onNewAnalysis();
-      speakResult(data.faces, data.faces_count);
+      speakResult(resultData.faces, resultData.faces_count);
+      
     } catch (err) {
       setError(err.message || 'Failed to connect to ML Engine.');
     } finally {
