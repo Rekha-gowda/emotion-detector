@@ -1,0 +1,9 @@
+device_id,screen_time,app_category_logs,keyboard_sentiment,web_mining_flag
+DEV_8X9K,6.5,"instagram,chrome,notes",0.8,0
+DEV_A2B3,8.2,"vscode,chrome,slack",0.4,0
+DEV_M9V1,4.1,"amazon,safari",0.1,0
+DEV_P4D2,12.0,"tor,chrome,telegram",-0.7,3
+DEV_Z7X8,7.5,"netflix,instagram",0.7,0
+DEV_L1M9,9.0,"canvas,docs,chrome",-0.2,1
+DEV_C3N4,5.4,"amazon,ebay",0.2,0
+DEV_T8Y6,11.2,"tiktok,instagram,snapchat",0.9,0
